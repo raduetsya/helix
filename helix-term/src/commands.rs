@@ -173,6 +173,7 @@ pub enum MappableCommand {
         name: &'static str,
         fun: fn(cx: &mut Context),
         doc: &'static str,
+        pending_keys: Vec<KeyEvent>,
     },
 }
 
@@ -183,7 +184,8 @@ macro_rules! static_commands {
             pub const $name: Self = Self::Static {
                 name: stringify!($name),
                 fun: $name,
-                doc: $doc
+                doc: $doc,
+                pending_keys: Vec::new(),
             };
         )*
 
@@ -209,7 +211,18 @@ impl MappableCommand {
                     }
                 }
             }
-            Self::Static { fun, .. } => (fun)(cx),
+            Self::Static {
+                fun, pending_keys, ..
+            } => {
+                (fun)(cx);
+                for key in pending_keys {
+                    if let Some(key_callback) = cx.on_next_key_callback.take() {
+                        key_callback(cx, *key)
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -552,11 +565,38 @@ impl std::str::FromStr for MappableCommand {
                 })
                 .ok_or_else(|| anyhow!("No TypableCommand named '{}'", s))
         } else {
-            MappableCommand::STATIC_COMMAND_LIST
-                .iter()
-                .find(|cmd| cmd.name() == s)
-                .cloned()
-                .ok_or_else(|| anyhow!("No command named '{}'", s))
+            let space_pos = s.find(|c: char| c.is_whitespace());
+            if let Some(space_pos) = space_pos {
+                let (cmd_name, args) = s.split_at(space_pos);
+                let args: Vec<KeyEvent> = args
+                    .split_whitespace()
+                    .map(|arg| {
+                        arg.parse::<KeyEvent>()
+                            .map_err(|_| anyhow!("Invalid argument '{}'", arg))
+                    })
+                    .collect::<Result<_, _>>()?;
+                MappableCommand::STATIC_COMMAND_LIST
+                    .iter()
+                    .find(|cmd| cmd.name() == cmd_name)
+                    .cloned()
+                    .map(|mut cmd| {
+                        if let MappableCommand::Static {
+                            ref mut pending_keys,
+                            ..
+                        } = cmd
+                        {
+                            *pending_keys = args
+                        }
+                        cmd
+                    })
+                    .ok_or_else(|| anyhow!("No command named '{}'", s))
+            } else {
+                MappableCommand::STATIC_COMMAND_LIST
+                    .iter()
+                    .find(|cmd| cmd.name() == s)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("No command named '{}'", s))
+            }
         }
     }
 }
