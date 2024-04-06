@@ -102,13 +102,43 @@ struct SymbolInformationItem {
     offset_encoding: OffsetEncoding,
 }
 
+struct SymbolStyles {
+    kind: Style,
+    container: Style,
+    symbol: Style,
+}
+
+impl SymbolStyles {
+    pub fn new(cx: &Context) -> Self {
+        Self {
+            kind: cx.editor.theme.get("label"),
+            container: cx.editor.theme.get("comment"),
+            symbol: cx.editor.theme.get("attribute"), // TODO: add function and type
+        }
+    }
+}
+
 impl ui::menu::Item for SymbolInformationItem {
     /// Path to currently focussed document
-    type Data = Option<lsp::Url>;
+    type Data = (Option<lsp::Url>, SymbolStyles);
 
-    fn format(&self, current_doc_path: &Self::Data) -> Row {
+    fn format(&self, (current_doc_path, styles): &Self::Data) -> Row {
         if current_doc_path.as_ref() == Some(&self.symbol.location.uri) {
-            self.symbol.name.as_str().into()
+            let kind_str = format!("[{:?}]", &self.symbol.kind); // TODO: stylize kind
+            let prefix_str = self
+                .symbol
+                .container_name
+                .as_ref()
+                .map(|prefix| format!("{}::", prefix))
+                .unwrap_or(String::new());
+            let symbol_str = self.symbol.name.to_owned();
+            Spans::from(vec![
+                Span::styled(kind_str, styles.kind),
+                Span::raw(" ".to_owned()),
+                Span::styled(prefix_str, styles.container),
+                Span::styled(symbol_str, styles.symbol),
+            ])
+            .into()
         } else {
             match self.symbol.location.uri.to_file_path() {
                 Ok(path) => {
@@ -122,6 +152,23 @@ impl ui::menu::Item for SymbolInformationItem {
                 }
                 Err(_) => format!("{} ({})", &self.symbol.name, &self.symbol.location.uri).into(),
             }
+        }
+    }
+
+    fn sort_text(&self, _data: &Self::Data) -> std::borrow::Cow<str> {
+        format!(
+            "{} {:09}",
+            self.symbol.location.uri, self.symbol.location.range.start.line
+        )
+        .into()
+    }
+
+    fn filter_text(&self, data: &Self::Data) -> std::borrow::Cow<str> {
+        if data.0.as_ref() == Some(&self.symbol.location.uri) {
+            self.symbol.name.as_str().into()
+        } else {
+            let label: String = self.format(data).cell_text().collect();
+            label.into()
         }
     }
 }
@@ -244,9 +291,13 @@ fn jump_to_position(
 
 type SymbolPicker = Picker<SymbolInformationItem>;
 
-fn sym_picker(symbols: Vec<SymbolInformationItem>, current_path: Option<lsp::Url>) -> SymbolPicker {
+fn sym_picker(
+    symbols: Vec<SymbolInformationItem>,
+    current_path: Option<lsp::Url>,
+    styles: SymbolStyles,
+) -> SymbolPicker {
     // TODO: drop current_path comparison and instead use workspace: bool flag?
-    Picker::new(symbols, current_path, move |cx, item, action| {
+    Picker::new(symbols, (current_path, styles), move |cx, item, action| {
         jump_to_location(
             cx.editor,
             &item.symbol.location,
@@ -386,6 +437,8 @@ pub fn symbol_picker(cx: &mut Context) {
         return;
     }
 
+    let styles = SymbolStyles::new(&cx);
+
     cx.jobs.callback(async move {
         let mut symbols = Vec::new();
         // TODO if one symbol request errors, all other requests are discarded (even if they're valid)
@@ -393,7 +446,7 @@ pub fn symbol_picker(cx: &mut Context) {
             symbols.append(&mut lsp_items);
         }
         let call = move |_editor: &mut Editor, compositor: &mut Compositor| {
-            let picker = sym_picker(symbols, current_url);
+            let picker = sym_picker(symbols, current_url, styles);
             compositor.push(Box::new(overlaid(picker)))
         };
 
@@ -458,10 +511,12 @@ pub fn workspace_symbol_picker(cx: &mut Context) {
     let current_url = doc.url();
     let initial_symbols = get_symbols("".to_owned(), cx.editor);
 
+    let styles = SymbolStyles::new(&cx);
+
     cx.jobs.callback(async move {
         let symbols = initial_symbols.await?;
         let call = move |_editor: &mut Editor, compositor: &mut Compositor| {
-            let picker = sym_picker(symbols, current_url);
+            let picker = sym_picker(symbols, current_url, styles);
             let dyn_picker = DynamicPicker::new(picker, Box::new(get_symbols));
             compositor.push(Box::new(overlaid(dyn_picker)))
         };
